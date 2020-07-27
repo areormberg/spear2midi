@@ -11,7 +11,8 @@ __version__ = "0.0.1"
 __license__ = "CC"
 
 from math import log, floor, ceil, trunc
-from mido import MidiFile, MidiTrack, Message
+import rtmidi
+from mido import MidiFile, MidiTrack, Message, open_output
 from traces import TimeSeries
 
 class Partial:
@@ -26,51 +27,57 @@ class Partial:
     length = 0
     index = 0
     root_frequency = 440
-    pb_range = 4
+    pb_range = 2
     note_list = MidiTrack()
-    offset = 0
+    midiout = ''
     
-    def __init__(self, index, length, start, end, time_vector, freq_vector, amp_vector, root_frequency, pb_range, offset):
-        self.offset = int(offset*1000)
+    def __init__(self, index, length, start, end, time_vector, freq_vector, amp_vector, root_frequency, pb_range, midiout):
         self.index = index
         self.length = length
-        self.start = int(start*1000) #+self.offset
-        self.end = int(end*1000) #+self.offset
+        self.start = int(start*1000) 
+        self.end = int(end*1000) 
         freq_vector = list(map(lambda x: float(x.replace(',','.')), freq_vector))
-        self.time_vector = list(map(lambda x: floor(float(x.replace(',','.'))*1000)+self.offset, time_vector))
+        self.time_vector = list(map(lambda x: floor(float(x.replace(',','.'))*1000), time_vector))
         amp_vector = list(map(lambda x: float(x.replace(',','.')), amp_vector))
         
         #redestribute irregular time data
         for k,t in enumerate(self.time_vector):
             self.freq_ts[t] = (freq_vector[k])
             self.amp_ts[t] = (amp_vector[k])
-        self.freq_ts = self.freq_ts.sample(sampling_period=1,start=self.start,end=self.end,interpolate='linear')
-        self.amp_ts = self.amp_ts.sample(sampling_period=1,start=self.start,end=self.end,interpolate='linear')
+        self.freq_ts = self.freq_ts.sample(sampling_period=5,start=self.start,end=self.end,interpolate='linear')
+        self.amp_ts = self.amp_ts.sample(sampling_period=5,start=self.start,end=self.end,interpolate='linear')
         self.freq_vector = [x[1] for x in self.freq_ts]
         self.amp_vector = [x[1] for x in self.amp_ts]
         self.root_frequency = root_frequency
         self.pb_range = pb_range
         print("index"+index)
-        self.build_note_list(self.start, self.end)
+        self.build_note_list(0, len(self.freq_vector))
+        self.note_list.append(Message('note_off', note=64, velocity=0, time=24))
+        self.midiout = midiout
 
     def build_note_list(self, start, end):
-        if len(self.freq_vector[start:end]) == 0: return
+       # print(start,end,len(self.freq_vector[start:end]))
+        list_length = len(self.freq_vector[start:end])
+        if list_length < 3: return
         distance = midi_note_distance(max(self.freq_vector[start:end]),min(self.freq_vector[start:end]),self.root_frequency)
         if distance < (self.pb_range*2):
-            midi_note = floor(f2st(min(self.freq_vector[start:end]), self.root_frequency) + 69 + (self.pb_range/2))
+            midi_note = floor(f2st(min(self.freq_vector[start:end]), self.root_frequency) + 69 + (self.pb_range))
             if midi_note < 0 or midi_note > 127: return
             self.note_list.append(Message('note_on', note=midi_note, velocity=64, time=0))
             print(self.note_list[-1])
             for i, f in enumerate(self.freq_vector[start:end]):
+                time = 3
+                if i == 0 or i == list_length-1: time = 0
                 bend = frequency_to_pitchbend(f, midi_note, self.root_frequency, self.pb_range)
-                self.note_list.append(Message('pitchwheel', pitch=bend, time=1))
+                self.note_list.append(Message('pitchwheel', pitch=bend, time=time))
                 print(self.note_list[-1])
             self.note_list.append(Message('note_off', note=midi_note, velocity=64, time=0))
             print(self.note_list[-1])
         else:
-            middle = trunc(len(self.freq_vector[start:end])/2)
+            middle = ((end-start)//2)+start
+         #   print(start,middle,end)
             self.build_note_list(start, middle)
-            self.build_note_list(middle, end)
+            self.build_note_list(middle+1, end)
 
 
 def midi_note_distance(fmax,fmin,root_frequency):
@@ -97,22 +104,32 @@ def pairwise(iterable):
     
 def main():
     #open spear file
-    with open('seinfeld slap.txt') as f:
+    with open('Untitled.txt') as f:
         spear = f.readlines()
     
     root_frequency = 440
-    pb_range = 4
-    offset = 0
+    pb_range = 2
 
     #init midi file
     mid = MidiFile()
     tracks = MidiTrack()
     
+    #init out port
+    midiout = rtmidi.MidiOut()
+    available_ports = midiout.get_ports()
+    if available_ports:
+        midiout.open_port(0)
+    else:
+        midiout.open_virtual_port("Virtual port")
+    
     #read data from spear file
+    
+    partials = []
+    
     for a,b in pairwise(spear[4:]):
         a_split = a.split(' ')
         b_split = b.split(' ')
-        partial = (
+        partials.append(
             Partial(a_split[0].replace(',','.'), 
                 float(a_split[1].replace(',','.')), 
                 float(a_split[2].replace(',','.')), 
@@ -122,18 +139,14 @@ def main():
                 b_split[2::3], 
                 root_frequency, 
                 pb_range,
-                offset
+                midiout
             )
         )
-        
-        offset += float(a_split[3].replace(',','.'))
-        
-        if(partial.note_list): 
-            tracks.extend(partial.note_list)
+    
+    tracks.extend(partials[-1].note_list)
 
     mid.tracks.append(tracks)
 
-    print('Saving output.mid')
     mid.save('output.mid')
 
 if __name__ == "__main__":
